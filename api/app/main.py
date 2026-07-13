@@ -15,7 +15,7 @@ from slowapi.util import get_remote_address
 
 from app.config import settings
 from app.database import init_db
-from app.routes import auth
+from app.routes import auth, projects, github, webhooks
 
 
 @asynccontextmanager
@@ -81,6 +81,9 @@ async def security_headers(request: Request, call_next):
 
 # ── Routes ───────────────────────────────────
 app.include_router(auth.router, prefix="/v1")
+app.include_router(projects.router, prefix="/v1")
+app.include_router(github.router, prefix="/v1")
+app.include_router(webhooks.router, prefix="/v1")
 
 
 # ── Health Check ─────────────────────────────
