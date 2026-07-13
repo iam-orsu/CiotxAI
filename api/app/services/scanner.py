@@ -98,6 +98,70 @@ def detect_project_info(files: dict[str, str]) -> str:
     return "\n".join(info_parts)
 
 
+def run_semgrep(scan_root: str) -> list[dict]:
+    """Run Semgrep as safety net. Returns findings in our standard format."""
+    try:
+        result = subprocess.run(
+            ["semgrep", scan_root, "--config=auto", "--json", "--quiet", "--no-git-ignore"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode not in (0, 1):
+            return []
+        import json
+        data = json.loads(result.stdout)
+        findings = []
+        for r in data.get("results", []):
+            findings.append({
+                "title": f"Semgrep: {r.get('check_id', 'unknown')}",
+                "severity": _map_semgrep_severity(r.get("extra", {}).get("severity", "warning")),
+                "cwe_id": r.get("extra", {}).get("metadata", {}).get("cwe"),
+                "file_path": r.get("path", "unknown"),
+                "line_start": r.get("start", {}).get("line"),
+                "line_end": r.get("end", {}).get("line"),
+                "vulnerable_code": r.get("extra", {}).get("lines", ""),
+                "description": r.get("extra", {}).get("message", ""),
+                "fix_suggestion": r.get("extra", {}).get("fix", ""),
+                "confidence": 0.85,
+            })
+        return findings
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _map_semgrep_severity(sev: str) -> str:
+    mapping = {"error": "high", "warning": "medium", "info": "low", "note": "info"}
+    return mapping.get(sev.lower(), "medium")
+
+
+def run_gitleaks(scan_root: str) -> list[dict]:
+    """Run Gitleaks for secret detection."""
+    try:
+        result = subprocess.run(
+            ["gitleaks", "detect", "--source", scan_root, "--no-git", "--report-format=json", "--verbose"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode not in (0, 1):
+            return []
+        import json
+        data = json.loads(result.stdout) if result.stdout.strip() else []
+        findings = []
+        for r in data if isinstance(data, list) else []:
+            findings.append({
+                "title": f"Hardcoded secret: {r.get('Description', 'unknown')}",
+                "severity": "critical",
+                "cwe_id": "CWE-798",
+                "file_path": r.get("File", "unknown"),
+                "line_start": r.get("StartLine"),
+                "vulnerable_code": r.get("Secret", "")[:50] + "..." if r.get("Secret") else "",
+                "description": f"Hardcoded secret detected: {r.get('Description', '')}",
+                "fix_suggestion": "Remove this secret and use environment variables instead.",
+                "confidence": 0.95,
+            })
+        return findings
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
 async def run_scan(scan_id: str, project_id: str, repo_url: str | None, local_path: str | None = None):
     """Run the full scan pipeline for a scan job."""
     from app.database import async_session
@@ -148,7 +212,20 @@ async def run_scan(scan_id: str, project_id: str, repo_url: str | None, local_pa
             project_info = detect_project_info(files)
             findings = await run_ai_review(scan_id, project_id, files, project_info, db)
 
-            # Phase 3: Triage & Store
+            # Phase 3: Safety Net (Semgrep + Gitleaks)
+            semgrep_findings = run_semgrep(scan_root)
+            gitleaks_findings = run_gitleaks(scan_root)
+
+            # Dedup: skip safety net findings already covered by AI
+            seen = {(f.get("file_path"), f.get("line_start")) for f in findings}
+            for f in semgrep_findings + gitleaks_findings:
+                key = (f.get("file_path"), f.get("line_start"))
+                if key not in seen:
+                    f["source_agent"] = "semgrep" if f in semgrep_findings else "gitleaks"
+                    findings.append(f)
+                    seen.add(key)
+
+            # Phase 4: Triage & Store
             scan.status = "triaging"
             await db.flush()
 

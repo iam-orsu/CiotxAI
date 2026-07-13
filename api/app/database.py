@@ -33,6 +33,13 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
-    """Create all tables. Called at startup. Migrations handle production."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Run Alembic migrations at startup. Falls back to create_all in dev."""
+    try:
+        from alembic.config import Config
+        from alembic import command
+        alembic_cfg = Config("alembic.ini")
+        command.upgrade(alembic_cfg, "head")
+    except Exception:
+        # Fallback for dev: create all tables directly
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
