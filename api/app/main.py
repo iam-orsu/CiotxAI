@@ -15,7 +15,7 @@ from slowapi.util import get_remote_address
 
 from app.config import settings
 from app.database import init_db
-from app.routes import auth, github, projects, scans, vulns, webhooks
+from app.routes import auth, billing, github, projects, scans, vulns, webhooks
 
 
 @asynccontextmanager
@@ -81,6 +81,7 @@ async def security_headers(request: Request, call_next):
 
 # ── Routes ───────────────────────────────────
 app.include_router(auth.router, prefix="/v1")
+app.include_router(billing.router, prefix="/v1")
 app.include_router(projects.router, prefix="/v1")
 app.include_router(scans.router, prefix="/v1")
 app.include_router(vulns.router, prefix="/v1")
