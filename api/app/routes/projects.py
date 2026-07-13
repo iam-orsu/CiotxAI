@@ -8,10 +8,41 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.project import Project
+from app.models.scan import Scan, Vulnerability
 from app.schemas.project import CreateProjectRequest, ProjectListResponse, ProjectResponse
 from app.services.auth import decode_access_token, get_user_by_id
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+
+async def get_vuln_counts(db: AsyncSession, project_id: str) -> dict:
+    """Get real vulnerability counts per severity for a project."""
+    result = await db.execute(
+        select(
+            Vulnerability.severity,
+            sa_func.count(Vulnerability.id).label("count"),
+        )
+        .where(Vulnerability.project_id == project_id)
+        .group_by(Vulnerability.severity)
+    )
+    rows = result.all()
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for severity, count in rows:
+        if severity in counts:
+            counts[severity] = count
+    return counts
+
+
+async def get_last_scan_date(db: AsyncSession, project_id: str):
+    """Get the most recent scan completion date."""
+    result = await db.execute(
+        select(Scan.completed_at)
+        .where(Scan.project_id == project_id, Scan.status == "completed")
+        .order_by(Scan.completed_at.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    return row
 
 
 async def get_current_user(request: Request, db: AsyncSession):
@@ -44,6 +75,8 @@ async def list_projects(
 
     project_list = []
     for p in projects:
+        counts = await get_vuln_counts(db, p.id)
+        last_scan = await get_last_scan_date(db, p.id)
         project_list.append(ProjectResponse(
             id=p.id,
             name=p.name,
@@ -55,8 +88,8 @@ async def list_projects(
             default_branch=p.default_branch,
             scan_schedule=p.scan_schedule,
             project_type=p.project_type,
-            vuln_counts={"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-            last_scan_at=None,
+            vuln_counts=counts,
+            last_scan_at=last_scan,
             created_at=p.created_at,
         ))
 
@@ -122,6 +155,9 @@ async def get_project(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
 
+    counts = await get_vuln_counts(db, project.id)
+    last_scan = await get_last_scan_date(db, project.id)
+
     return ProjectResponse(
         id=project.id,
         name=project.name,
@@ -133,8 +169,8 @@ async def get_project(
         default_branch=project.default_branch,
         scan_schedule=project.scan_schedule,
         project_type=project.project_type,
-        vuln_counts={"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-        last_scan_at=None,
+        vuln_counts=counts,
+        last_scan_at=last_scan,
         created_at=project.created_at,
     )
 
