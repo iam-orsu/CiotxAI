@@ -1,7 +1,8 @@
 "use client";
 
-import { api, getMe, logout } from "@/lib/api";
-import { LogOut, Plus, Scan, Shield, ExternalLink, Trash2 } from "lucide-react";
+import Sidebar from "@/components/Sidebar";
+import { api, getMe } from "@/lib/api";
+import { Plus, Scan, ExternalLink, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -78,32 +79,9 @@ export default function DashboardPage() {
   const isTrial = user.plan_status === "trial";
 
   return (
-    <div className="min-h-screen bg-bg-base">
-      <header className="border-b border-border-subtle">
-        <div className="max-w-[1200px] mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Shield className="w-5 h-5 text-accent" />
-            <span className="font-semibold tracking-tight">CIOTX</span>
-          </div>
-          <div className="flex items-center gap-4">
-            {isTrial ? (
-              <span className="text-xs bg-status-warning/10 text-status-warning px-2 py-1 rounded-full font-medium">
-                Trial · 7 days
-              </span>
-            ) : (
-              <span className="text-xs bg-status-success/10 text-status-success px-2 py-1 rounded-full font-medium">
-                {user.plan === "pro" ? "Pro" : "Starter"} · Active
-              </span>
-            )}
-            <span className="text-sm text-text-secondary">{user.email}</span>
-            <button onClick={logout} className="text-text-tertiary hover:text-text-secondary transition-colors">
-              <LogOut className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-[1200px] mx-auto px-6 py-12">
+    <div className="flex">
+      <Sidebar user={user} />
+      <main className="flex-1 min-h-screen px-8 py-10 max-w-[1000px]">
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight mb-1">Projects</h1>
