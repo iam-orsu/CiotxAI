@@ -261,13 +261,18 @@ func status(cfg *config.Config) error {
 	}
 
 	for _, s := range scans[:min(5, len(scans))] {
-		status := s["status"].(string)
+		id, _ := s["id"].(string)
+		status, _ := s["status"].(string)
+		if id == "" || status == "" {
+			continue
+		}
 		icon := "🟢"
 		if status != "completed" {
 			icon = "🔄"
 		}
-		fmt.Printf("  %s Scan %s — %s (%v findings)\n",
-			icon, s["id"].(string)[:8], status, s["total_findings"])
+		findings := s["total_findings"]
+		fmt.Printf("  %s Scan %.8s — %s (%v findings)\n",
+			icon, id, status, findings)
 	}
 	fmt.Println()
 	return nil

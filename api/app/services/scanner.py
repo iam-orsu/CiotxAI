@@ -184,10 +184,24 @@ async def run_scan(scan_id: str, project_id: str, repo_url: str | None, local_pa
                 scan_root = local_path
             elif repo_url:
                 tmpdir = tempfile.mkdtemp(prefix="ciotx-scan-")
-                subprocess.run(
+                clone_result = subprocess.run(
                     ["git", "clone", "--depth=1", repo_url, tmpdir],
                     capture_output=True, timeout=60,
                 )
+                if clone_result.returncode != 0:
+                    scan.status = "failed"
+                    scan.completed_at = datetime.now(timezone.utc)
+                    agent_log = ScanAgentLog(
+                        scan_id=scan_id,
+                        agent_name="orchestrator",
+                        status="failed",
+                        error_message=f"git clone failed: {clone_result.stderr.decode()[:500]}",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    db.add(agent_log)
+                    await db.flush()
+                    await db.commit()
+                    return
                 scan_root = tmpdir
             else:
                 scan.status = "failed"
@@ -250,7 +264,7 @@ async def run_scan(scan_id: str, project_id: str, repo_url: str | None, local_pa
                     line_end=f.get("line_end"),
                     vulnerable_code=f.get("vulnerable_code"),
                     fix_suggestion=f.get("fix_suggestion"),
-                    source_agent="ai_reviewer",
+                    source_agent=f.get("source_agent", "ai_reviewer"),
                     confidence=f.get("confidence", 0.7),
                 )
                 db.add(vuln)
@@ -265,10 +279,16 @@ async def run_scan(scan_id: str, project_id: str, repo_url: str | None, local_pa
             scan.status = "completed"
             scan.completed_at = datetime.now(timezone.utc)
             await db.flush()
+            await db.commit()  # CRITICAL: must commit or all results are lost
 
         except Exception as e:
-            scan.status = "failed"
-            scan.completed_at = datetime.now(timezone.utc)
+            # Don't rollback — we need to persist the failure status
+            # Re-query scan in current transaction since it may be expired
+            result = await db.execute(select(Scan).where(Scan.id == scan_id))
+            scan = result.scalar_one_or_none()
+            if scan:
+                scan.status = "failed"
+                scan.completed_at = datetime.now(timezone.utc)
             agent_log = ScanAgentLog(
                 scan_id=scan_id,
                 agent_name="orchestrator",
@@ -278,6 +298,7 @@ async def run_scan(scan_id: str, project_id: str, repo_url: str | None, local_pa
             )
             db.add(agent_log)
             await db.flush()
+            await db.commit()  # Persist failure status
         finally:
             if tmpdir:
                 import shutil

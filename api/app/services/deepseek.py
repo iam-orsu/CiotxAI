@@ -104,9 +104,15 @@ async def run_ai_review(
     if settings.OPENAI_API_KEY and not settings.DEEPSEEK_API_KEY:
         base_url = "https://api.openai.com/v1"
         model = "gpt-4o"
-    elif settings.ANTHROPIC_API_KEY and not settings.DEEPSEEK_API_KEY:
+    elif settings.ANTHROPIC_API_KEY and not settings.DEEPSEEK_API_KEY and not settings.OPENAI_API_KEY:
+        # Anthropic uses a different API format — require CIOTX relay in production
+        # For dev: use Anthropic directly via their Messages API
         base_url = "https://api.anthropic.com/v1"
         model = "claude-sonnet-5-20251001"
+        # Return early with warning — Anthropic's API is not OpenAI-compatible
+        # In production, always use the CIOTX relay which normalizes provider formats
+        if not settings.DEV_MODE:
+            raise ValueError("Anthropic requires the CIOTX relay in production. Set DEEPSEEK_API_KEY or OPENAI_API_KEY for direct access.")
 
     context = build_context(files, project_info)
 

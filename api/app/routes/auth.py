@@ -32,6 +32,7 @@ from app.services.auth import (
     get_user_by_email,
     get_user_by_id,
     hash_password,
+    ph,
     rotate_refresh_token,
     store_refresh_token,
     verify_email_code,
@@ -154,6 +155,11 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
             detail="Invalid email or password.",
         )
 
+    # Rehash password if argon2 parameters have changed
+    if ph.check_needs_rehash(user.password_hash):
+        user.password_hash = hash_password(body.password)
+        await db.flush()
+
     if not user.email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -217,6 +223,9 @@ async def me(request: Request, db: AsyncSession = Depends(get_db)):
 
 # ── GitHub OAuth ─────────────────────────────
 
+OAUTH_STATES: dict[str, str] = {}
+
+
 @router.get("/github")
 async def github_login():
     if not settings.GITHUB_CLIENT_ID:
@@ -226,6 +235,7 @@ async def github_login():
         )
 
     state = secrets.token_urlsafe(32)
+    OAUTH_STATES[state] = datetime.now(timezone.utc).isoformat()
     redirect_uri = f"{settings.API_BASE_URL}/v1/auth/github/callback"
 
     github_url = (
@@ -245,6 +255,11 @@ async def github_callback(code: str, state: str, db: AsyncSession = Depends(get_
     Handle GitHub OAuth callback. Exchange code for access token,
     fetch user info, create or link account.
     """
+    # Validate OAuth state to prevent CSRF
+    if state not in OAUTH_STATES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth state.")
+    del OAUTH_STATES[state]
+
     if not settings.GITHUB_CLIENT_ID or not settings.GITHUB_CLIENT_SECRET:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,

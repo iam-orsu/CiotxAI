@@ -108,12 +108,15 @@ func (c *LLMClient) ReviewCode(files []DiscoveredFile, projectInfo string) ([]LL
 
 	bodyBytes, _ := json.Marshal(reqBody)
 
+	req, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+
 	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Post(
-		c.BaseURL+"/chat/completions",
-		"application/json",
-		bytes.NewReader(bodyBytes),
-	)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("LLM request failed: %w", err)
 	}

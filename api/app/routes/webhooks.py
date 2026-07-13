@@ -17,7 +17,10 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 def verify_signature(payload_body: bytes, signature_header: str | None) -> bool:
     """Verify GitHub webhook HMAC-SHA256 signature."""
     if not settings.GITHUB_WEBHOOK_SECRET:
-        return True  # Skip verification if not configured
+        # In dev mode, warn but accept. In production, reject.
+        if settings.DEV_MODE:
+            return True
+        return False
 
     if not signature_header:
         return False

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -143,12 +144,18 @@ func ListScans(cfg *config.Config) ([]map[string]interface{}, error) {
 }
 
 func doRequest(cfg *config.Config, method, url string, body io.Reader) ([]byte, error) {
-	req, err := http.NewRequest(method, url, body)
+	// Read body BEFORE creating request so both first call and retry get fresh readers
+	var bodyBytes []byte
+	if body != nil {
+		bodyBytes, _ = io.ReadAll(body)
+	}
+
+	req, err := http.NewRequest(method, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.AccessToken)
-	if body != nil {
+	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
@@ -168,9 +175,13 @@ func doRequest(cfg *config.Config, method, url string, body io.Reader) ([]byte, 
 		if err := RefreshToken(cfg); err != nil {
 			return nil, fmt.Errorf("authentication expired — please run 'ciotx login'")
 		}
-		// Retry with new token
-		req.Header.Set("Authorization", "Bearer "+cfg.AccessToken)
-		resp2, err := http.DefaultClient.Do(req)
+		// Retry with new token and fresh body
+		retryReq, _ := http.NewRequest(method, url, bytes.NewReader(bodyBytes))
+		retryReq.Header.Set("Authorization", "Bearer "+cfg.AccessToken)
+		if bodyBytes != nil {
+			retryReq.Header.Set("Content-Type", "application/json")
+		}
+		resp2, err := http.DefaultClient.Do(retryReq)
 		if err != nil {
 			return nil, err
 		}

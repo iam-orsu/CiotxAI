@@ -3,6 +3,7 @@ CIOTX API — GitHub Routes
 OAuth connection, repo listing, webhook receiver.
 """
 
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import secrets
@@ -36,6 +37,9 @@ async def get_current_user(request: Request, db: AsyncSession):
 
 # ── GitHub OAuth ─────────────────────────────
 
+GH_OAUTH_STATES: dict[str, str] = {}
+
+
 @router.get("/github/connect")
 async def github_connect():
     """Start GitHub OAuth flow for repo access."""
@@ -46,6 +50,7 @@ async def github_connect():
         )
 
     state = secrets.token_urlsafe(32)
+    GH_OAUTH_STATES[state] = datetime.now(timezone.utc).isoformat()
     redirect_uri = f"{settings.API_BASE_URL}/v1/github/callback"
 
     url = (
@@ -67,6 +72,11 @@ async def github_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """Handle GitHub OAuth callback for repo access. Stores encrypted token."""
+    # Validate OAuth state to prevent CSRF
+    if state not in GH_OAUTH_STATES:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state.")
+    del GH_OAUTH_STATES[state]
+
     user = await get_current_user(request, db)
 
     if not settings.GITHUB_CLIENT_ID or not settings.GITHUB_CLIENT_SECRET:
@@ -106,9 +116,15 @@ async def github_callback(
     github_user_id = gh_user["id"]
     github_username = gh_user["login"]
 
-    # Encrypt and store the token (AES-256-GCM in production, base64 for dev)
+    # Encrypt token: AES-256-GCM in production, base64 in dev
     import base64
-    token_enc = base64.b64encode(access_token.encode()).decode()
+    if settings.DEV_MODE:
+        token_enc = "DEV:" + base64.b64encode(access_token.encode()).decode()
+    else:
+        from cryptography.fernet import Fernet
+        key = base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest())
+        f = Fernet(key)
+        token_enc = "AES:" + f.encrypt(access_token.encode()).decode()
 
     # Upsert the connection
     result = await db.execute(
@@ -158,7 +174,18 @@ async def list_repos(
     import base64
     import httpx
 
-    access_token = base64.b64decode(connection.access_token_enc).decode()
+    # Decrypt token: handle both dev (base64) and production (Fernet AES-256)
+    token_enc = connection.access_token_enc
+    if token_enc.startswith("DEV:"):
+        access_token = base64.b64decode(token_enc[4:]).decode()
+    elif token_enc.startswith("AES:"):
+        from cryptography.fernet import Fernet
+        key = base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest())
+        f = Fernet(key)
+        access_token = f.decrypt(token_enc[4:].encode()).decode()
+    else:
+        # Legacy: plain base64 (upgrade on next connect)
+        access_token = base64.b64decode(token_enc).decode()
 
     repos = []
     page = 1

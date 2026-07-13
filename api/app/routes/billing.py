@@ -195,3 +195,90 @@ async def cancel_subscription(request: Request, db: AsyncSession = Depends(get_d
     await db.flush()
 
     return {"message": "Subscription cancelled. Access continues until end of billing period."}
+
+
+@router.post("/billing/webhook")
+async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Receive Razorpay payment confirmation. Activates subscription on payment.success."""
+    if not settings.RAZORPAY_WEBHOOK_SECRET:
+        if settings.DEV_MODE:
+            return {"message": "Webhook received (DEV MODE — no verification)."}
+        raise HTTPException(status_code=501, detail="Razorpay webhook not configured.")
+
+    body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    # Verify webhook signature
+    expected = hmac.new(
+        settings.RAZORPAY_WEBHOOK_SECRET.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+
+    import json
+    event = json.loads(body)
+    event_type = event.get("event", "")
+
+    if event_type != "payment.captured":
+        return {"message": f"Event {event_type} acknowledged."}
+
+    payment = event.get("payload", {}).get("payment", {}).get("entity", {})
+    notes = payment.get("notes", {})
+    user_id = notes.get("user_id")
+    plan = notes.get("plan", "starter")
+    period = notes.get("period", "monthly")
+    payment_id = payment.get("id")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing user_id in payment notes.")
+
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    period_end = now + timedelta(days=365 if period == "annual" else 30)
+
+    # Find existing subscription or create one
+    result = await db.execute(select(Subscription).where(Subscription.user_id == user_id))
+    sub = result.scalar_one_or_none()
+
+    if sub:
+        sub.plan = plan
+        sub.billing_period = period
+        sub.status = "active"
+        sub.razorpay_payment_id = payment_id
+        sub.current_period_start = now
+        sub.current_period_end = period_end
+    else:
+        sub = Subscription(
+            user_id=user_id,
+            plan=plan,
+            billing_period=period,
+            status="active",
+            razorpay_payment_id=payment_id,
+            current_period_start=now,
+            current_period_end=period_end,
+        )
+        db.add(sub)
+
+    # Update user plan
+    from app.models.user import User
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user = user_result.scalar_one_or_none()
+    if user:
+        user.plan = plan
+        user.plan_status = "active"
+
+    # Mark invoice as paid
+    invoice_result = await db.execute(
+        select(Invoice).where(Invoice.razorpay_order_id == payment.get("order_id"))
+    )
+    invoice = invoice_result.scalar_one_or_none()
+    if invoice:
+        invoice.status = "paid"
+        invoice.razorpay_payment_id = payment_id
+        invoice.paid_at = now
+
+    await db.flush()
+
+    return {"message": f"Payment confirmed. Plan {plan} activated."}

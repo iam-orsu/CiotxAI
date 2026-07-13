@@ -1,5 +1,7 @@
 """CIOTX API — Scan Routes"""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -85,6 +87,7 @@ async def trigger_scan(
     )
     db.add(scan)
     await db.flush()
+    await db.commit()  # Commit BEFORE enqueuing so worker sees the row
 
     # Enqueue via ARQ for reliable execution
     from app.worker import enqueue_scan
@@ -108,6 +111,32 @@ async def submit_local_scan(request: Request, db: AsyncSession = Depends(get_db)
     user = await get_current_user(request, db)
     body = await request.json()
 
+    # Enforce scan limits (same logic as cloud scan trigger)
+    sub = None
+    if user.plan != "pro":
+        sub_result = await db.execute(select(Subscription).where(Subscription.user_id == user.id))
+        sub = sub_result.scalar_one_or_none()
+        scan_count = 0
+
+        if sub:
+            scans_limit = 20 if sub.plan == "starter" else -1
+            if scans_limit > 0 and sub.scans_used >= scans_limit:
+                raise HTTPException(status_code=402, detail=f"Scan limit reached ({sub.scans_used}/{scans_limit}). Upgrade to Pro.")
+            sub.scans_used += 1
+            scan_count = sub.scans_used
+        elif user.plan_status == "trial":
+            count_result = await db.execute(
+                select(sa_func.count(Scan.id)).where(
+                    Scan.project_id.in_(select(Project.id).where(Project.created_by == user.id)),
+                    Scan.status != "failed",
+                )
+            )
+            scan_count = count_result.scalar() or 0
+            if scan_count >= 10:
+                raise HTTPException(status_code=402, detail="Trial limit reached (10 scans). Subscribe to continue.")
+        else:
+            raise HTTPException(status_code=402, detail="No active plan. Subscribe to start scanning.")
+
     # Create or find project
     project_name = body.get("name", "local-scan")
     result = await db.execute(
@@ -125,13 +154,14 @@ async def submit_local_scan(request: Request, db: AsyncSession = Depends(get_db)
         await db.flush()
 
     # Create scan record
+    now = datetime.now(timezone.utc)
     scan = Scan(
         project_id=project.id,
         trigger_type="cli",
         status="completed",
         files_scanned=body.get("files_scanned", 0),
-        started_at=sa_func.now(),
-        completed_at=sa_func.now(),
+        started_at=now,
+        completed_at=now,
     )
     db.add(scan)
     await db.flush()

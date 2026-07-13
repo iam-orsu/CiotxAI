@@ -1,7 +1,7 @@
 """CIOTX API — Vulnerability Routes"""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -48,8 +48,13 @@ async def list_vulns(
     if status:
         query = query.where(Vulnerability.status == status.lower())
 
+    severity_order = sa_func.case(
+        {"critical": 1, "high": 2, "medium": 3, "low": 4, "info": 5},
+        value=Vulnerability.severity,
+        else_=99,
+    )
     query = query.order_by(
-        Vulnerability.severity.asc(),
+        severity_order.asc(),
         Vulnerability.created_at.desc(),
     ).offset(offset).limit(limit)
 
@@ -57,7 +62,6 @@ async def list_vulns(
     vulns = result.scalars().all()
 
     # Count total
-    from sqlalchemy import func as sa_func
     count_query = select(sa_func.count(Vulnerability.id)).where(Vulnerability.project_id == project_id)
     if severity:
         count_query = count_query.where(Vulnerability.severity == severity.lower())
