@@ -20,7 +20,7 @@ class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=new_uuid)
-    team_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
+    team_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     repo_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     repo_provider: Mapped[str] = mapped_column(String(50), default="github", nullable=False)
