@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.project import Project
 from app.models.scan import Vulnerability
 from app.services.auth import decode_access_token, get_user_by_id
 
@@ -35,6 +36,11 @@ async def list_vulns(
     db: AsyncSession = Depends(get_db),
 ):
     user = await get_current_user(request, db)
+
+    # Verify ownership
+    proj = await db.execute(select(Project).where(Project.id == project_id, Project.created_by == user.id))
+    if not proj.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Project not found.")
 
     query = select(Vulnerability).where(Vulnerability.project_id == project_id)
     if severity:
@@ -97,6 +103,11 @@ async def get_vuln(
     if not vuln:
         raise HTTPException(status_code=404, detail="Vulnerability not found.")
 
+    # Verify ownership
+    proj = await db.execute(select(Project).where(Project.id == vuln.project_id, Project.created_by == user.id))
+    if not proj.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Vulnerability not found.")
+
     return {
         "id": vuln.id,
         "scan_id": vuln.scan_id,
@@ -136,6 +147,11 @@ async def update_vuln_status(
     result = await db.execute(select(Vulnerability).where(Vulnerability.id == vuln_id))
     vuln = result.scalar_one_or_none()
     if not vuln:
+        raise HTTPException(status_code=404, detail="Vulnerability not found.")
+
+    # Verify ownership
+    proj = await db.execute(select(Project).where(Project.id == vuln.project_id, Project.created_by == user.id))
+    if not proj.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Vulnerability not found.")
 
     vuln.status = new_status

@@ -27,6 +27,8 @@ func Execute() error {
 	switch os.Args[1] {
 	case "login":
 		return login(cfg)
+	case "scan":
+		return scanRepo(cfg)
 	case "status":
 		return status(cfg)
 	case "dashboard":
@@ -127,19 +129,81 @@ func login(cfg *config.Config) error {
 	return nil
 }
 
+func scanRepo(cfg *config.Config) error {
+	if !cfg.IsAuthenticated() {
+		fmt.Println("  Not authenticated. Run 'ciotx login' first.")
+		return nil
+	}
+
+	// Get repo URL from args
+	repoURL := ""
+	if len(os.Args) > 2 {
+		repoURL = os.Args[2]
+	}
+
+	if repoURL == "" {
+		fmt.Print("  Repository URL: ")
+		fmt.Scanln(&repoURL)
+	}
+
+	if repoURL == "" {
+		fmt.Println("  No repository URL provided.")
+		return nil
+	}
+
+	// Call API to find or create project and trigger scan
+	resp, err := api.TriggerScan(cfg, repoURL)
+	if err != nil {
+		return fmt.Errorf("scan failed: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("  ✅ Scan queued — ID: %s\n", resp["scan_id"])
+	fmt.Printf("  📊 Dashboard: %s/dashboard\n", cfg.DashboardURL)
+	fmt.Println()
+	return nil
+}
+
 func status(cfg *config.Config) error {
 	if !cfg.IsAuthenticated() {
 		fmt.Println("  Not authenticated. Run 'ciotx login' first.")
 		return nil
 	}
 
+	scans, err := api.ListScans(cfg)
+	if err != nil {
+		fmt.Printf("  Failed to fetch scans: %v\n", err)
+		return nil
+	}
+
 	fmt.Println()
 	fmt.Printf("  Authenticated as: %s\n", cfg.UserEmail)
-	fmt.Println("  API: ", cfg.APIURL)
 	fmt.Println()
-	fmt.Println("  No recent scans. Run 'ciotx' and select 'Scan a repository'.")
+
+	if len(scans) == 0 {
+		fmt.Println("  No scans yet. Run 'ciotx scan <repo-url>' to start.")
+		fmt.Println()
+		return nil
+	}
+
+	for _, s := range scans[:min(5, len(scans))] {
+		status := s["status"].(string)
+		icon := "🟢"
+		if status != "completed" {
+			icon = "🔄"
+		}
+		fmt.Printf("  %s Scan %s — %s (%v findings)\n",
+			icon, s["id"].(string)[:8], status, s["total_findings"])
+	}
 	fmt.Println()
 	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func openDashboard(cfg *config.Config) error {

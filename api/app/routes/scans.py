@@ -70,6 +70,11 @@ async def list_scans(
 ):
     user = await get_current_user(request, db)
 
+    # Verify ownership
+    proj = await db.execute(select(Project).where(Project.id == project_id, Project.created_by == user.id))
+    if not proj.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Project not found.")
+
     result = await db.execute(
         select(Scan)
         .where(Scan.project_id == project_id)
@@ -108,11 +113,16 @@ async def get_scan(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    await get_current_user(request, db)
+    user = await get_current_user(request, db)
 
     result = await db.execute(select(Scan).where(Scan.id == scan_id))
     scan = result.scalar_one_or_none()
     if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found.")
+
+    # Verify ownership
+    proj = await db.execute(select(Project).where(Project.id == scan.project_id, Project.created_by == user.id))
+    if not proj.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Scan not found.")
 
     # Get agent logs
