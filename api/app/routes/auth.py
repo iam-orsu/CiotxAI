@@ -462,3 +462,62 @@ async def cli_token(body: CliTokenRequest, db: AsyncSession = Depends(get_db)):
         access_token=access_token,
         refresh_token=refresh_token,
     )
+
+
+# ── Password Reset ───────────────────────────
+
+RESET_TOKENS: dict[str, tuple[str, datetime]] = {}
+
+
+@router.post("/forgot-password")
+async def forgot_password(body: dict, db: AsyncSession = Depends(get_db)):
+    """Request a password reset. In dev mode, returns the reset token directly."""
+    email = body.get("email", "").lower().strip()
+    user = await get_user_by_email(db, email)
+
+    if not user:
+        return {"message": "If an account exists with that email, a reset link has been sent."}
+
+    if not user.password_hash:
+        return {"message": "This account uses GitHub OAuth. Please sign in with GitHub."}
+
+    token = secrets.token_urlsafe(32)
+    RESET_TOKENS[email] = (token, datetime.now(timezone.utc) + timedelta(hours=1))
+
+    if settings.DEV_MODE:
+        return {
+            "message": "Password reset token generated (DEV MODE).",
+            "reset_token": token,
+        }
+
+    return {"message": "If an account exists with that email, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+async def reset_password(body: dict, db: AsyncSession = Depends(get_db)):
+    """Reset password using a valid reset token."""
+    email = body.get("email", "").lower().strip()
+    token = body.get("token", "")
+    new_password = body.get("new_password", "")
+
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    stored = RESET_TOKENS.get(email)
+    if not stored:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    stored_token, expires_at = stored
+    if stored_token != token or datetime.now(timezone.utc) > expires_at:
+        del RESET_TOKENS[email]
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+
+    user = await get_user_by_email(db, email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.password_hash = hash_password(new_password)
+    del RESET_TOKENS[email]
+    await db.flush()
+
+    return {"message": "Password reset successfully. You can now log in."}

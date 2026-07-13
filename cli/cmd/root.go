@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
 	"github.com/ciotx/cli/internal/api"
 	"github.com/ciotx/cli/internal/auth"
 	"github.com/ciotx/cli/internal/config"
+	"github.com/ciotx/cli/internal/engine"
 )
 
 func Execute() error {
@@ -135,23 +137,36 @@ func scanRepo(cfg *config.Config) error {
 		return nil
 	}
 
-	// Get repo URL from args
+	// Check for --path flag (local scan)
+	localPath := ""
 	repoURL := ""
-	if len(os.Args) > 2 {
+	for i, arg := range os.Args {
+		if arg == "--path" && i+1 < len(os.Args) {
+			localPath = os.Args[i+1]
+		}
+	}
+	if localPath == "" && len(os.Args) > 2 && os.Args[2] != "--path" {
 		repoURL = os.Args[2]
 	}
 
+	// Local scan mode
+	if localPath != "" {
+		return runLocalScan(cfg, localPath)
+	}
+
+	// Cloud scan mode
 	if repoURL == "" {
-		fmt.Print("  Repository URL: ")
+		fmt.Print("  Repository URL (or use --path ./dir for local scan): ")
 		fmt.Scanln(&repoURL)
 	}
 
 	if repoURL == "" {
 		fmt.Println("  No repository URL provided.")
+		fmt.Println("  Usage: ciotx scan <repo-url>")
+		fmt.Println("         ciotx scan --path ./my-project")
 		return nil
 	}
 
-	// Call API to find or create project and trigger scan
 	resp, err := api.TriggerScan(cfg, repoURL)
 	if err != nil {
 		return fmt.Errorf("scan failed: %w", err)
@@ -160,6 +175,65 @@ func scanRepo(cfg *config.Config) error {
 	fmt.Println()
 	fmt.Printf("  ✅ Scan queued — ID: %s\n", resp["scan_id"])
 	fmt.Printf("  📊 Dashboard: %s/dashboard\n", cfg.DashboardURL)
+	fmt.Println()
+	return nil
+}
+
+func runLocalScan(cfg *config.Config, path string) error {
+	fmt.Println()
+	fmt.Println("  ═══════════════════════════════════")
+	fmt.Println("  CIOTX Local Scan")
+	fmt.Println("  Code NEVER leaves this machine.")
+	fmt.Println("  ═══════════════════════════════════")
+	fmt.Println()
+
+	// Import the engine package
+	enginePath := "github.com/ciotx/cli/internal/engine"
+	fmt.Printf("  Scanning: %s\n", path)
+
+	result, err := engine.RunLocalScan(path)
+	if err != nil {
+		return fmt.Errorf("scan failed: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("  Files scanned: %d\n", result.FilesScanned)
+	fmt.Printf("  Languages: %s\n", result.Languages)
+	fmt.Printf("  Duration: %.1fs\n", result.Duration.Seconds())
+
+	if len(result.Findings) == 0 {
+		fmt.Println()
+		fmt.Println("  ✅ No vulnerabilities found.")
+		fmt.Println()
+		return nil
+	}
+
+	// Count by severity
+	sevCounts := map[string]int{}
+	for _, f := range result.Findings {
+		sevCounts[f.Severity]++
+	}
+
+	fmt.Println()
+	fmt.Printf("  🔴 Critical: %d\n", sevCounts["critical"])
+	fmt.Printf("  🟠 High:     %d\n", sevCounts["high"])
+	fmt.Printf("  🟡 Medium:   %d\n", sevCounts["medium"])
+	fmt.Printf("  🔵 Low:      %d\n", sevCounts["low"])
+
+	// Push findings to cloud
+	fmt.Println()
+	fmt.Println("  Pushing findings to CIOTX Cloud...")
+
+	projectName := filepath.Base(path)
+	scanID, err := engine.PushFindings(cfg.APIURL, cfg.AccessToken, projectName, result)
+	if err != nil {
+		fmt.Printf("  ⚠️  Failed to push findings: %v\n", err)
+		fmt.Println("  Findings are shown above. You can view them in the dashboard after reconnecting.")
+	} else {
+		fmt.Printf("  ✅ Findings pushed — Scan ID: %s\n", scanID)
+		fmt.Printf("  📊 View full report: %s/dashboard\n", cfg.DashboardURL)
+	}
+
 	fmt.Println()
 	return nil
 }

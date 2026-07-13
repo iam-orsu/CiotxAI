@@ -102,6 +102,83 @@ async def trigger_scan(
     }
 
 
+@router.post("/scans/local", status_code=201)
+async def submit_local_scan(request: Request, db: AsyncSession = Depends(get_db)):
+    """Receive findings from a local CLI scan. Creates project + scan + vulnerabilities from uploaded findings."""
+    user = await get_current_user(request, db)
+    body = await request.json()
+
+    # Create or find project
+    project_name = body.get("name", "local-scan")
+    result = await db.execute(
+        select(Project).where(Project.name == project_name, Project.created_by == user.id)
+    )
+    project = result.scalar_one_or_none()
+
+    if not project:
+        project = Project(
+            name=project_name,
+            project_type="manual",
+            created_by=user.id,
+        )
+        db.add(project)
+        await db.flush()
+
+    # Create scan record
+    scan = Scan(
+        project_id=project.id,
+        trigger_type="cli",
+        status="completed",
+        files_scanned=body.get("files_scanned", 0),
+        started_at=sa_func.now(),
+        completed_at=sa_func.now(),
+    )
+    db.add(scan)
+    await db.flush()
+
+    # Store findings
+    severity_map = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    stored = 0
+
+    for f in body.get("findings", []):
+        sev = f.get("severity", "medium").lower()
+        if sev not in severity_map:
+            sev = "medium"
+
+        vuln = Vulnerability(
+            scan_id=scan.id,
+            project_id=project.id,
+            title=f.get("title", "Untitled"),
+            description=f.get("description", ""),
+            severity=sev,
+            cwe_id=f.get("cwe_id"),
+            file_path=f.get("file_path", "unknown"),
+            line_start=f.get("line_start"),
+            line_end=f.get("line_end"),
+            vulnerable_code=f.get("vulnerable_code"),
+            fix_suggestion=f.get("fix_suggestion"),
+            source_agent="cli_local",
+            confidence=f.get("confidence", 0.7),
+        )
+        db.add(vuln)
+        severity_map[sev] = severity_map.get(sev, 0) + 1
+        stored += 1
+
+    scan.total_findings = stored
+    scan.critical_count = severity_map["critical"]
+    scan.high_count = severity_map["high"]
+    scan.medium_count = severity_map["medium"]
+    scan.low_count = severity_map["low"]
+    await db.flush()
+
+    return {
+        "scan_id": scan.id,
+        "project_id": project.id,
+        "total_findings": stored,
+        "message": f"Local scan results received. {stored} findings stored.",
+    }
+
+
 @router.get("/projects/{project_id}/scans")
 async def list_scans(
     project_id: str,
