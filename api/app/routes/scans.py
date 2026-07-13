@@ -1,12 +1,12 @@
 """CIOTX API — Scan Routes"""
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
+from app.models.billing import Subscription
 from app.models.project import Project
 from app.models.scan import Scan, ScanAgentLog, Vulnerability
 from app.services.auth import decode_access_token, get_user_by_id
@@ -42,6 +42,42 @@ async def trigger_scan(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
 
+    # Check scan limits for non-pro users
+    sub = None
+    if user.plan != "pro":
+        # Get subscription or trial info
+        sub_result = await db.execute(select(Subscription).where(Subscription.user_id == user.id))
+        sub = sub_result.scalar_one_or_none()
+
+        if sub:
+            scans_limit = 20 if sub.plan == "starter" else -1
+            if scans_limit > 0 and sub.scans_used >= scans_limit:
+                raise HTTPException(
+                    status_code=402,
+                    detail=f"Scan limit reached ({sub.scans_used}/{scans_limit}). Upgrade to Pro for unlimited scans.",
+                )
+        elif user.plan_status == "trial":
+            # Count scans during trial
+            count_result = await db.execute(
+                select(sa_func.count(Scan.id)).where(
+                    Scan.project_id.in_(
+                        select(Project.id).where(Project.created_by == user.id)
+                    )
+                )
+            )
+            trial_scans = count_result.scalar() or 0
+            if trial_scans >= 10:
+                raise HTTPException(
+                    status_code=402,
+                    detail="Trial scan limit reached (10 scans). Subscribe to continue.",
+                )
+        else:
+            # No subscription and no trial — shouldn't happen but block just in case
+            raise HTTPException(
+                status_code=402,
+                detail="No active plan. Subscribe to start scanning.",
+            )
+
     scan = Scan(
         project_id=project_id,
         trigger_type="manual",
@@ -50,10 +86,14 @@ async def trigger_scan(
     db.add(scan)
     await db.flush()
 
-    # Fire-and-forget: enqueue scan job
-    from app.services.scanner import run_scan
-    import asyncio
-    asyncio.create_task(run_scan(scan.id, project_id, project.repo_url))
+    # Enqueue via ARQ for reliable execution
+    from app.worker import enqueue_scan
+    await enqueue_scan(scan.id, project_id, project.repo_url)
+
+    # Update scan usage counter for paying subscribers
+    if sub:
+        sub.scans_used += 1
+        await db.flush()
 
     return {
         "scan_id": scan.id,
